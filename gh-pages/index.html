@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chamados Express — Registro de Atendimentos de TI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Auth Screen -->
+  <section id="authView" class="auth-wrapper hidden">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="brand-icon">TI</div>
+        <div>
+          <h1>Chamados Express</h1>
+          <p>Modo SPA (LocalStorage + Backup JSON)</p>
+        </div>
+      </div>
+
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab active" data-mode="login">Entrar</button>
+        <button type="button" class="auth-tab" data-mode="register">Cadastrar Técnico</button>
+      </div>
+
+      <form id="loginForm" class="auth-form">
+        <div class="field">
+          <label for="loginEmail">E-mail do Técnico</label>
+          <input type="email" id="loginEmail" required placeholder="joao.silva@empresa.com.br" />
+        </div>
+        <div class="field">
+          <label for="loginPassword">Senha</label>
+          <input type="password" id="loginPassword" required placeholder="••••••" />
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">Entrar no Sistema</button>
+        <div class="field" style="margin-top: 6px;">
+          <label for="authSheetsUrl">URL do Banco Google Sheets (opcional)</label>
+          <input type="url" id="authSheetsUrl" placeholder="https://script.google.com/macros/s/.../exec" />
+        </div>
+        <div class="auth-hint">
+          Acesso padrão: <code>joao.silva@empresa.com.br</code> / senha: <code>123456</code>
+        </div>
+      </form>
+
+      <form id="registerForm" class="auth-form hidden">
+        <div class="field">
+          <label for="regName">Nome Completo</label>
+          <input type="text" id="regName" required placeholder="Ex: Carlos Eduardo" />
+        </div>
+        <div class="field">
+          <label for="regEmail">E-mail Corporativo</label>
+          <input type="email" id="regEmail" required placeholder="carlos@empresa.com.br" />
+        </div>
+        <div class="field">
+          <label for="regPassword">Senha (mín. 4 caracteres)</label>
+          <input type="password" id="regPassword" minlength="4" required placeholder="••••••" />
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">Criar Conta e Entrar</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- Main App -->
+  <div id="appView" class="hidden">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">TI</div>
+          <div>
+            <h1>Chamados Express</h1>
+            <p>Atendimentos sem chamado • Teams, Outlook &amp; Backup JSON</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span class="pill" id="dbModePill">Modo Local</span>
+          <button type="button" class="btn btn-secondary hidden" id="syncSheetsBtn" title="Atualizar dados do Google Sheets">
+            🔄 Sincronizar
+          </button>
+          <span class="user-chip" id="currentUserChip">👤 Técnico</span>
+          <button type="button" class="btn btn-secondary" id="exportJsonBtn" title="Baixar backup em JSON para salvar no Google Drive">
+            ⬇️ Exportar JSON
+          </button>
+          <button type="button" class="btn btn-secondary" id="importJsonBtn" title="Carregar arquivo JSON de backup">
+            ⬆️ Importar JSON
+          </button>
+          <input type="file" id="importFileInput" accept=".json,application/json" class="hidden" />
+          <button type="button" class="btn btn-secondary" id="openAuditBtn">
+            📜 Log
+          </button>
+          <button type="button" class="btn btn-secondary" id="openSettingsBtn">
+            ⚙️ Meu E-mail &amp; Config
+          </button>
+          <button type="button" class="btn btn-secondary" id="logoutBtn">
+            Sair
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- 3-Day Overdue Banner -->
+      <div id="overdueBanner" class="overdue-banner hidden" role="alert">
+        <div class="overdue-banner-content">
+          <span class="overdue-icon">⚠️</span>
+          <div>
+            <strong id="overdueBannerTitle">Atenção: atendimentos com +3 dias sem chamado aberto!</strong>
+            <p id="overdueBannerText"></p>
+          </div>
+        </div>
+        <button type="button" class="btn btn-warning-solid btn-sm" id="viewOverdueBtn">
+          Ver Pendências (+3 dias)
+        </button>
+      </div>
+
+      <!-- KPIs -->
+      <section class="kpi-grid" aria-label="Resumo dos atendimentos">
+        <div class="kpi-card">
+          <span class="kpi-label">Total de Atendimentos</span>
+          <strong class="kpi-value" id="kpiTotal">0</strong>
+        </div>
+        <div class="kpi-card kpi-pending">
+          <span class="kpi-label">Aguardando Chamado</span>
+          <strong class="kpi-value" id="kpiPending">0</strong>
+        </div>
+        <div class="kpi-card kpi-reminded">
+          <span class="kpi-label">Lembrete Enviado</span>
+          <strong class="kpi-value" id="kpiReminded">0</strong>
+        </div>
+        <div class="kpi-card kpi-resolved">
+          <span class="kpi-label">Regularizados</span>
+          <strong class="kpi-value" id="kpiResolved">0</strong>
+        </div>
+      </section>
+
+      <div class="workspace-grid">
+        <!-- Registration Form -->
+        <section class="card form-card">
+          <div class="card-header">
+            <h2>Registrar Atendimento</h2>
+            <span class="badge badge-neutral">Sem chamado aberto</span>
+          </div>
+          <form id="recordForm" class="form-body">
+            <div class="field">
+              <label for="userName">Nome do Usuário *</label>
+              <input type="text" id="userName" required placeholder="Ex: Mariana Costa" />
+            </div>
+
+            <div class="field">
+              <label for="userEmail">E-mail do Usuário (Teams / E-mail) *</label>
+              <input type="email" id="userEmail" required placeholder="Ex: mariana.costa@empresa.com.br" />
+            </div>
+
+            <div class="field-row">
+              <div class="field">
+                <label for="department">Setor / Departamento</label>
+                <input type="text" id="department" placeholder="Ex: Financeiro" />
+              </div>
+              <div class="field">
+                <label for="category">Categoria</label>
+                <select id="category">
+                  <option value="Rede / VPN">Rede / VPN</option>
+                  <option value="Hardware">Hardware</option>
+                  <option value="Software / ERP">Software / ERP</option>
+                  <option value="Acessos / Senha">Acessos / Senha</option>
+                  <option value="Impressora / Periféricos">Impressora / Periféricos</option>
+                  <option value="E-mail / Teams">E-mail / Teams</option>
+                  <option value="Outro">Outro</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="field-row">
+              <div class="field">
+                <label for="technician">Técnico Responsável *</label>
+                <input type="text" id="technician" list="techniciansList" required placeholder="Ex: João Silva" />
+                <datalist id="techniciansList"></datalist>
+              </div>
+              <div class="field">
+                <label for="attendedAt">Data / Hora do Atendimento</label>
+                <input type="datetime-local" id="attendedAt" />
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="problemDescription">Qual problema foi resolvido? *</label>
+              <textarea
+                id="problemDescription"
+                rows="4"
+                required
+                placeholder="Descreva o problema relatado pelo usuário e a solução aplicada..."
+              ></textarea>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-full" id="submitBtn">
+              + Registrar Atendimento
+            </button>
+          </form>
+        </section>
+
+        <!-- Records List -->
+        <section class="card list-card">
+          <div class="card-header list-header">
+            <div>
+              <h2>Atendimentos Registrados</h2>
+              <p class="subtitle">Salvo localmente no navegador. Use Exportar/Importar JSON para backup no Google Drive.</p>
+            </div>
+            <div class="filters-bar">
+              <input
+                type="search"
+                id="searchInput"
+                class="search-input"
+                placeholder="Buscar usuário, e-mail, problema..."
+              />
+              <select id="techFilter" class="select-compact" aria-label="Filtrar por técnico">
+                <option value="">Todos os técnicos</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="status-tabs" id="statusTabs">
+            <button type="button" class="tab active" data-status="all">Todos</button>
+            <button type="button" class="tab" data-status="pending">Aguardando Chamado</button>
+            <button type="button" class="tab" data-status="reminded">Lembrete Enviado</button>
+            <button type="button" class="tab" data-status="overdue">⚠️ +3 Dias Atrasado</button>
+            <button type="button" class="tab" data-status="resolved">Regularizados</button>
+          </div>
+
+          <div id="recordsList" class="records-list"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- Overdue (+3 days) Alert Modal -->
+  <div class="modal-backdrop hidden" id="overdueModal" role="dialog" aria-modal="true" aria-labelledby="overdueTitle">
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h3 id="overdueTitle">⚠️ Lembrete: Chamados há 3+ dias sem abertura</h3>
+        <button type="button" class="icon-btn" id="closeOverdueBtn" aria-label="Fechar">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="helper-text">
+          Os atendimentos abaixo foram realizados há <strong>3 dias ou mais</strong> e o solicitante ainda não abriu o chamado formal:
+        </p>
+        <div id="overdueModalList" class="overdue-modal-list"></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" id="ackOverdueBtn">Entendido</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Audit Log Modal -->
+  <div class="modal-backdrop hidden" id="auditModal" role="dialog" aria-modal="true" aria-labelledby="auditTitle">
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h3 id="auditTitle">📜 Log de Atividades dos Técnicos</h3>
+        <button type="button" class="icon-btn" id="closeAuditBtn" aria-label="Fechar">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="auditLogList" class="audit-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-backdrop hidden" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h3 id="settingsTitle">Configurações de E-mail, Portal &amp; Backup</h3>
+        <button type="button" class="icon-btn" id="closeSettingsBtn" aria-label="Fechar">✕</button>
+      </div>
+      <form id="settingsForm" class="modal-body">
+        <div class="settings-section">
+          <h4>Meu E-mail da Empresa &amp; Portal</h4>
+          <div class="field-row">
+            <div class="field">
+              <label for="cfgSenderEmail">Seu E-mail da Empresa</label>
+              <input type="email" id="cfgSenderEmail" placeholder="seu.nome@empresa.com.br" />
+            </div>
+            <div class="field">
+              <label for="cfgEmailProvider">Provedor Web (para abrir rascunho pronto)</label>
+              <select id="cfgEmailProvider">
+                <option value="outlook_office">Outlook Corporativo (outlook.office.com)</option>
+                <option value="outlook_live">Outlook.com / Live (outlook.live.com)</option>
+                <option value="gmail">Gmail (mail.google.com)</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="cfgPortalUrl">Link do Portal de Chamados (GLPI, Jira, ServiceNow, etc.)</label>
+            <input type="url" id="cfgPortalUrl" placeholder="https://suporte.empresa.com.br" />
+          </div>
+          <div class="field">
+            <label for="cfgTemplate">Modelo da Mensagem de Lembrete</label>
+            <div class="token-hints">
+              Variáveis:
+              <code>{nome}</code> <code>{email}</code> <code>{tecnico}</code> <code>{problema}</code>
+              <code>{categoria}</code> <code>{data}</code> <code>{link_portal}</code>
+            </div>
+            <textarea id="cfgTemplate" rows="5"></textarea>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4>Banco de Dados no Google Sheets (Apps Script)</h4>
+          <p class="helper-text">
+            Cole a URL do Web App do Google Apps Script (<code>.../exec</code>) para sincronizar todos os atendimentos, técnicos e logs em uma planilha compartilhada do Google Sheets.
+          </p>
+          <div class="field-inline">
+            <input type="url" id="cfgSheetsUrl" placeholder="https://script.google.com/macros/s/.../exec" />
+            <button type="button" class="btn btn-secondary" id="testSheetsBtn">Testar &amp; Sincronizar</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4>Backup Manual (Exportar / Importar JSON)</h4>
+          <p class="helper-text">
+            Use <strong>⬇️ Exportar JSON</strong> no topo para baixar todos os chamados, técnicos, configurações e logs em um arquivo <code>.json</code> e subir na sua pasta do Google Drive. Para carregar em outro PC, baixe o arquivo do Drive e clique em <strong>⬆️ Importar JSON</strong>.
+          </p>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelSettingsBtn">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Salvar Configurações</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Email Preview Modal -->
+  <div class="modal-backdrop hidden" id="emailPreviewModal" role="dialog" aria-modal="true" aria-labelledby="emailPreviewTitle">
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h3 id="emailPreviewTitle">✉️ E-mail Automático Gerado</h3>
+        <button type="button" class="icon-btn" id="closeEmailPreviewBtn" aria-label="Fechar">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="previewRecordId" />
+        <div class="field-row">
+          <div class="field">
+            <label for="previewFrom">Seu E-mail (Remetente)</label>
+            <input type="text" id="previewFrom" readonly />
+          </div>
+          <div class="field">
+            <label for="previewTo">Para (Solicitante)</label>
+            <input type="email" id="previewTo" readonly />
+          </div>
+        </div>
+        <div class="field">
+          <label for="previewSubject">Assunto</label>
+          <input type="text" id="previewSubject" />
+        </div>
+        <div class="field">
+          <label for="previewBody">Mensagem (pode editar se desejar)</label>
+          <textarea id="previewBody" rows="8"></textarea>
+        </div>
+        <div class="modal-footer" style="justify-content: space-between; flex-wrap: wrap;">
+          <button type="button" class="btn btn-secondary" id="previewCopyBtn">📋 Copiar E-mail</button>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" class="btn btn-secondary" id="previewOpenWebmailBtn">🌐 Abrir no Webmail</button>
+            <button type="button" class="btn btn-primary" id="previewOpenDesktopBtn">🖥️ Abrir no New Outlook (Desktop)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resolve Modal -->
+  <div class="modal-backdrop hidden" id="resolveModal" role="dialog" aria-modal="true" aria-labelledby="resolveTitle">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h3 id="resolveTitle">Regularizar Atendimento</h3>
+        <button type="button" class="icon-btn" id="closeResolveBtn" aria-label="Fechar">✕</button>
+      </div>
+      <form id="resolveForm" class="modal-body">
+        <input type="hidden" id="resolveRecordId" />
+        <p class="helper-text">Informe o número do chamado aberto pelo usuário (opcional) para marcar como regularizado.</p>
+        <div class="field">
+          <label for="officialTicketId">Número do Chamado Oficial</label>
+          <input type="text" id="officialTicketId" placeholder="Ex: #2026-0412" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelResolveBtn">Cancelar</button>
+          <button type="submit" class="btn btn-success">Confirmar Regularização</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
