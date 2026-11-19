@@ -1,13 +1,9 @@
 /**
  * Chamados Express — Backend Serverless no Google Sheets (Google Apps Script)
+ * Com suporte a Administrador, Lixeira/Recuperação, Gestão de Usuários e Segurança Server-Side.
  *
- * Como usar:
- * 1. Crie uma planilha no Google Sheets (https://sheets.new)
- * 2. Vá em Extensões -> Apps Script
- * 3. Apague o código padrão e cole este arquivo inteiro
- * 4. Clique em Salvar e depois em Implantar -> Nova implantação
- * 5. Tipo: App da Web | Executar como: Eu | Quem pode acessar: Qualquer pessoa
- * 6. Copie a URL gerada (/exec) e cole em "URL do Google Sheets (Apps Script)" no site!
+ * IMPORTANTE: Após atualizar este código no Apps Script, clique em:
+ * Implantar -> Gerenciar implantações -> Editar (ícone de lápis) -> Versão: Nova versão -> Implantar
  */
 
 const SHEETS = {
@@ -16,6 +12,29 @@ const SHEETS = {
   AUDIT: 'Logs',
   CONFIG: 'Config',
 };
+
+const RECORD_HEADERS = [
+  'id',
+  'userName',
+  'userEmail',
+  'department',
+  'technician',
+  'createdById',
+  'createdByName',
+  'category',
+  'problemDescription',
+  'status',
+  'officialTicketId',
+  'attendedAt',
+  'createdAt',
+  'updatedAt',
+  'remindersJson',
+  'deletedAt',
+  'deletedById',
+  'deletedByName',
+];
+
+const USER_HEADERS = ['id', 'name', 'email', 'password', 'role', 'canManageUsers', 'createdAt'];
 
 function getOrCreateSheet(ss, name, headers) {
   let sheet = ss.getSheetByName(name);
@@ -26,38 +45,24 @@ function getOrCreateSheet(ss, name, headers) {
       sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
       sheet.setFrozenRows(1);
     }
+  } else if (headers && headers.length) {
+    // Auto-migrate missing columns on existing sheets
+    const lastCol = Math.max(sheet.getLastColumn(), 1);
+    const existingHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+    headers.forEach((h) => {
+      if (!existingHeaders.includes(h)) {
+        const nextCol = sheet.getLastColumn() + 1;
+        sheet.getRange(1, nextCol).setValue(h).setFontWeight('bold');
+      }
+    });
   }
   return sheet;
 }
 
 function ensureStructure() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const recordsSheet = getOrCreateSheet(ss, SHEETS.RECORDS, [
-    'id',
-    'userName',
-    'userEmail',
-    'department',
-    'technician',
-    'createdById',
-    'createdByName',
-    'category',
-    'problemDescription',
-    'status',
-    'officialTicketId',
-    'attendedAt',
-    'createdAt',
-    'updatedAt',
-    'remindersJson',
-  ]);
-
-  const usersSheet = getOrCreateSheet(ss, SHEETS.USERS, [
-    'id',
-    'name',
-    'email',
-    'password',
-    'createdAt',
-  ]);
-
+  getOrCreateSheet(ss, SHEETS.RECORDS, RECORD_HEADERS);
+  const usersSheet = getOrCreateSheet(ss, SHEETS.USERS, USER_HEADERS);
   getOrCreateSheet(ss, SHEETS.AUDIT, [
     'id',
     'timestamp',
@@ -66,17 +71,20 @@ function ensureStructure() {
     'action',
     'summary',
   ]);
-
   const configSheet = getOrCreateSheet(ss, SHEETS.CONFIG, ['key', 'value']);
 
-  // Seed initial technicians if empty
-  if (usersSheet.getLastRow() <= 1) {
-    const now = new Date().toISOString();
-    usersSheet.appendRow(['tech-joao', 'João Silva', 'joao.silva@empresa.com.br', '123456', now]);
-    usersSheet.appendRow(['tech-ana', 'Ana Paula', 'ana.paula@empresa.com.br', '123456', now]);
+  const now = new Date().toISOString();
+  const existingUsers = sheetToObjects(usersSheet);
+
+  if (existingUsers.length === 0) {
+    usersSheet.appendRow(['tech-admin', 'Administrador TI', 'admin@empresa.com.br', 'admin123', 'admin', true, now]);
+    usersSheet.appendRow(['tech-joao', 'João Silva', 'joao.silva@empresa.com.br', '123456', 'tech', false, now]);
+    usersSheet.appendRow(['tech-ana', 'Ana Paula', 'ana.paula@empresa.com.br', '123456', 'tech', false, now]);
+  } else if (!existingUsers.some((u) => String(u.role) === 'admin')) {
+    // Ensure at least one admin exists if migrating from an older sheet
+    usersSheet.appendRow(['tech-admin', 'Administrador TI', 'admin@empresa.com.br', 'admin123', 'admin', true, now]);
   }
 
-  // Seed default settings if empty
   if (configSheet.getLastRow() <= 1) {
     configSheet.appendRow([
       'settings',
@@ -97,7 +105,7 @@ function ensureStructure() {
 function sheetToObjects(sheet) {
   const values = sheet.getDataRange().getValues();
   if (values.length <= 1) return [];
-  const headers = values[0];
+  const headers = values[0].map(String);
   return values.slice(1).map((row) => {
     const obj = {};
     headers.forEach((h, i) => {
@@ -105,6 +113,28 @@ function sheetToObjects(sheet) {
     });
     return obj;
   });
+}
+
+function sanitizeUser(u) {
+  const role = String(u.role || 'tech') === 'admin' ? 'admin' : 'tech';
+  const canManage = role === 'admin' || u.canManageUsers === true || String(u.canManageUsers).toLowerCase() === 'true';
+  return {
+    id: String(u.id),
+    name: String(u.name || ''),
+    email: String(u.email || ''),
+    role: role,
+    canManageUsers: canManage,
+    createdAt: String(u.createdAt || ''),
+  };
+}
+
+function verifyActor(ss, actorId, actorPassword) {
+  const users = sheetToObjects(ss.getSheetByName(SHEETS.USERS));
+  const found = users.find((u) => String(u.id) === String(actorId));
+  if (!found || String(found.password) !== String(actorPassword || '')) {
+    return null;
+  }
+  return sanitizeUser(found);
 }
 
 function readAllState() {
@@ -133,16 +163,14 @@ function readAllState() {
       createdAt: String(r.createdAt || ''),
       updatedAt: String(r.updatedAt || ''),
       reminders: reminders,
+      deletedAt: r.deletedAt ? String(r.deletedAt) : null,
+      deletedById: r.deletedById ? String(r.deletedById) : null,
+      deletedByName: r.deletedByName ? String(r.deletedByName) : null,
     };
   });
 
-  const users = sheetToObjects(ss.getSheetByName(SHEETS.USERS)).map((u) => ({
-    id: String(u.id),
-    name: String(u.name || ''),
-    email: String(u.email || ''),
-    password: String(u.password || ''),
-    createdAt: String(u.createdAt || ''),
-  }));
+  // Never expose passwords in doGet
+  const users = sheetToObjects(ss.getSheetByName(SHEETS.USERS)).map(sanitizeUser);
 
   const auditLog = sheetToObjects(ss.getSheetByName(SHEETS.AUDIT))
     .map((a) => ({
@@ -180,6 +208,43 @@ function appendAuditRow(ss, actorId, actorName, action, summary) {
   ]);
 }
 
+function buildRecordRowByHeaders(headers, r) {
+  const map = {
+    id: r.id,
+    userName: r.userName,
+    userEmail: r.userEmail,
+    department: r.department || '',
+    technician: r.technician,
+    createdById: r.createdById || '',
+    createdByName: r.createdByName || '',
+    category: r.category || 'Geral',
+    problemDescription: r.problemDescription,
+    status: r.status || 'pending',
+    officialTicketId: r.officialTicketId || '',
+    attendedAt: r.attendedAt,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    remindersJson: JSON.stringify(r.reminders || []),
+    deletedAt: r.deletedAt || '',
+    deletedById: r.deletedById || '',
+    deletedByName: r.deletedByName || '',
+  };
+  return headers.map((h) => (map[h] !== undefined ? map[h] : ''));
+}
+
+function buildUserRowByHeaders(headers, u) {
+  const map = {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    password: u.password,
+    role: u.role || 'tech',
+    canManageUsers: Boolean(u.canManageUsers),
+    createdAt: u.createdAt,
+  };
+  return headers.map((h) => (map[h] !== undefined ? map[h] : ''));
+}
+
 function jsonOut(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(
     ContentService.MimeType.JSON
@@ -202,49 +267,56 @@ function doPost(e) {
     const ss = ensureStructure();
     const action = body.action;
 
+    if (action === 'login') {
+      const users = sheetToObjects(ss.getSheetByName(SHEETS.USERS));
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+      const found = users.find(
+        (u) => String(u.email).trim().toLowerCase() === email && String(u.password) === password
+      );
+      if (!found) {
+        return jsonOut({ ok: false, error: 'E-mail ou senha inválidos.' });
+      }
+      return jsonOut({ ok: true, user: sanitizeUser(found) });
+    }
+
     if (action === 'register') {
+      // Public registration ALWAYS creates a standard 'tech' user — never 'admin'
       const usersSheet = ss.getSheetByName(SHEETS.USERS);
       const users = sheetToObjects(usersSheet);
+      const headers = usersSheet.getRange(1, 1, 1, usersSheet.getLastColumn()).getValues()[0].map(String);
       const email = String(body.email || '').trim().toLowerCase();
-      if (users.some((u) => String(u.email).toLowerCase() === email)) {
+      if (users.some((u) => String(u.email).trim().toLowerCase() === email)) {
         return jsonOut({ ok: false, error: 'Já existe um técnico cadastrado com este e-mail.' });
       }
-      const user = {
+      const userObj = {
         id: Utilities.getUuid(),
         name: String(body.name || '').trim(),
         email: email,
         password: String(body.password || ''),
+        role: 'tech',
+        canManageUsers: false,
         createdAt: new Date().toISOString(),
       };
-      usersSheet.appendRow([user.id, user.name, user.email, user.password, user.createdAt]);
-      appendAuditRow(ss, user.id, user.name, 'register', `Técnico ${user.name} (${user.email}) cadastrado.`);
-      return jsonOut({ ok: true, user });
+      usersSheet.appendRow(buildUserRowByHeaders(headers, userObj));
+      appendAuditRow(ss, userObj.id, userObj.name, 'register', `Técnico ${userObj.name} (${userObj.email}) cadastrado.`);
+      return jsonOut({ ok: true, user: sanitizeUser(userObj) });
     }
 
     if (action === 'create_record') {
+      const actor = verifyActor(ss, body.actorId, body.actorPassword);
+      if (!actor) return jsonOut({ ok: false, error: 'Sessão inválida. Faça login novamente.' });
+
       const r = body.record;
+      r.createdById = actor.id;
+      r.createdByName = actor.name;
       const sheet = ss.getSheetByName(SHEETS.RECORDS);
-      sheet.appendRow([
-        r.id,
-        r.userName,
-        r.userEmail,
-        r.department || '',
-        r.technician,
-        r.createdById || '',
-        r.createdByName || '',
-        r.category || 'Geral',
-        r.problemDescription,
-        r.status || 'pending',
-        r.officialTicketId || '',
-        r.attendedAt,
-        r.createdAt,
-        r.updatedAt,
-        JSON.stringify(r.reminders || []),
-      ]);
+      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+      sheet.appendRow(buildRecordRowByHeaders(headers, r));
       appendAuditRow(
         ss,
-        r.createdById,
-        r.createdByName || r.technician,
+        actor.id,
+        actor.name,
         'create',
         `Registrou atendimento para ${r.userName} (${r.category}) — Técnico: ${r.technician}`
       );
@@ -252,60 +324,190 @@ function doPost(e) {
     }
 
     if (action === 'update_record') {
+      const actor = verifyActor(ss, body.actorId, body.actorPassword);
+      if (!actor) return jsonOut({ ok: false, error: 'Sessão inválida.' });
+
       const sheet = ss.getSheetByName(SHEETS.RECORDS);
       const data = sheet.getDataRange().getValues();
-      const headers = data[0];
+      const headers = data[0].map(String);
       const idIdx = headers.indexOf('id');
       const rowIdx = data.findIndex((row, idx) => idx > 0 && String(row[idIdx]) === String(body.id));
-      if (rowIdx === -1) {
-        return jsonOut({ ok: false, error: 'Atendimento não encontrado.' });
-      }
-      const updated = body.record;
-      const newRow = [
-        updated.id,
-        updated.userName,
-        updated.userEmail,
-        updated.department || '',
-        updated.technician,
-        updated.createdById || '',
-        updated.createdByName || '',
-        updated.category || 'Geral',
-        updated.problemDescription,
-        updated.status || 'pending',
-        updated.officialTicketId || '',
-        updated.attendedAt,
-        updated.createdAt,
-        updated.updatedAt,
-        JSON.stringify(updated.reminders || []),
-      ];
+      if (rowIdx === -1) return jsonOut({ ok: false, error: 'Atendimento não encontrado.' });
+
+      const newRow = buildRecordRowByHeaders(headers, body.record);
       sheet.getRange(rowIdx + 1, 1, 1, newRow.length).setValues([newRow]);
       if (body.auditSummary) {
-        appendAuditRow(ss, body.actorId, body.actorName, body.auditAction || 'update', body.auditSummary);
+        appendAuditRow(ss, actor.id, actor.name, body.auditAction || 'update', body.auditSummary);
       }
-      return jsonOut({ ok: true, record: updated });
+      return jsonOut({ ok: true, record: body.record });
     }
 
     if (action === 'delete_record') {
+      const actor = verifyActor(ss, body.actorId, body.actorPassword);
+      if (!actor) return jsonOut({ ok: false, error: 'Credenciais inválidas para excluir.' });
+
       const sheet = ss.getSheetByName(SHEETS.RECORDS);
       const data = sheet.getDataRange().getValues();
-      const headers = data[0];
+      const headers = data[0].map(String);
       const idIdx = headers.indexOf('id');
       const ownerIdx = headers.indexOf('createdById');
       const nameIdx = headers.indexOf('userName');
       const rowIdx = data.findIndex((row, idx) => idx > 0 && String(row[idIdx]) === String(body.id));
-      if (rowIdx === -1) {
-        return jsonOut({ ok: false, error: 'Atendimento não encontrado.' });
+      if (rowIdx === -1) return jsonOut({ ok: false, error: 'Atendimento não encontrado.' });
+
+      const isOwner = String(data[rowIdx][ownerIdx]) === String(actor.id);
+      if (actor.role !== 'admin' && !isOwner) {
+        return jsonOut({ ok: false, error: 'Apenas o administrador ou quem registrou pode excluir.' });
       }
-      if (String(data[rowIdx][ownerIdx]) !== String(body.actorId)) {
-        return jsonOut({ ok: false, error: 'Apenas o técnico que registrou pode excluir.' });
-      }
-      const targetUser = data[rowIdx][nameIdx];
-      sheet.deleteRow(rowIdx + 1);
-      appendAuditRow(ss, body.actorId, body.actorName, 'delete', `Excluiu atendimento de ${targetUser}`);
+
+      const now = new Date().toISOString();
+      const delAtIdx = headers.indexOf('deletedAt');
+      const delByIdIdx = headers.indexOf('deletedById');
+      const delByNameIdx = headers.indexOf('deletedByName');
+      sheet.getRange(rowIdx + 1, delAtIdx + 1).setValue(now);
+      sheet.getRange(rowIdx + 1, delByIdIdx + 1).setValue(actor.id);
+      sheet.getRange(rowIdx + 1, delByNameIdx + 1).setValue(actor.name);
+
+      appendAuditRow(ss, actor.id, actor.name, 'trash', `Moveu atendimento de ${data[rowIdx][nameIdx]} para a lixeira.`);
+      return jsonOut({ ok: true, deletedAt: now, deletedById: actor.id, deletedByName: actor.name });
+    }
+
+    if (action === 'restore_record') {
+      const actor = verifyActor(ss, body.actorId, body.actorPassword);
+      if (!actor) return jsonOut({ ok: false, error: 'Credenciais inválidas.' });
+
+      const sheet = ss.getSheetByName(SHEETS.RECORDS);
+      const data = sheet.getDataRange().getValues();
+      const headers = data[0].map(String);
+      const idIdx = headers.indexOf('id');
+      const delByIdIdx = headers.indexOf('deletedById');
+      const ownerIdx = headers.indexOf('createdById');
+      const nameIdx = headers.indexOf('userName');
+      const rowIdx = data.findIndex((row, idx) => idx > 0 && String(row[idIdx]) === String(body.id));
+      if (rowIdx === -1) return jsonOut({ ok: false, error: 'Atendimento não encontrado.' });
+
+      const canRestore =
+        actor.role === 'admin' ||
+        String(data[rowIdx][delByIdIdx]) === String(actor.id) ||
+        String(data[rowIdx][ownerIdx]) === String(actor.id);
+      if (!canRestore) return jsonOut({ ok: false, error: 'Sem permissão para restaurar.' });
+
+      sheet.getRange(rowIdx + 1, headers.indexOf('deletedAt') + 1).setValue('');
+      sheet.getRange(rowIdx + 1, delByIdIdx + 1).setValue('');
+      sheet.getRange(rowIdx + 1, headers.indexOf('deletedByName') + 1).setValue('');
+
+      appendAuditRow(ss, actor.id, actor.name, 'restore', `Restaurou atendimento de ${data[rowIdx][nameIdx]} da lixeira.`);
       return jsonOut({ ok: true });
     }
 
+    if (action === 'purge_record') {
+      const actor = verifyActor(ss, body.actorId, body.actorPassword);
+      if (!actor || actor.role !== 'admin') {
+        return jsonOut({ ok: false, error: 'Apenas o administrador pode excluir definitivamente.' });
+      }
+      const sheet = ss.getSheetByName(SHEETS.RECORDS);
+      const data = sheet.getDataRange().getValues();
+      const headers = data[0].map(String);
+      const idIdx = headers.indexOf('id');
+      const nameIdx = headers.indexOf('userName');
+      const rowIdx = data.findIndex((row, idx) => idx > 0 && String(row[idIdx]) === String(body.id));
+      if (rowIdx === -1) return jsonOut({ ok: false, error: 'Atendimento não encontrado.' });
+
+      const targetName = data[rowIdx][nameIdx];
+      sheet.deleteRow(rowIdx + 1);
+      appendAuditRow(ss, actor.id, actor.name, 'purge', `Excluiu permanentemente o atendimento de ${targetName}.`);
+      return jsonOut({ ok: true });
+    }
+
+    if (action === 'manage_user') {
+      const actor = verifyActor(ss, body.actorId, body.actorPassword);
+      if (!actor || (actor.role !== 'admin' && !actor.canManageUsers)) {
+        return jsonOut({ ok: false, error: 'Sem permissão para gerenciar usuários.' });
+      }
+
+      const usersSheet = ss.getSheetByName(SHEETS.USERS);
+      const data = usersSheet.getDataRange().getValues();
+      const headers = data[0].map(String);
+      const op = body.op;
+
+      if (op === 'create') {
+        const email = String(body.email || '').trim().toLowerCase();
+        const existing = sheetToObjects(usersSheet);
+        if (existing.some((u) => String(u.email).trim().toLowerCase() === email)) {
+          return jsonOut({ ok: false, error: 'E-mail já cadastrado.' });
+        }
+        // Only admin can grant canManageUsers; never allow creating another admin via API
+        const canManage = actor.role === 'admin' ? Boolean(body.canManageUsers) : false;
+        const userObj = {
+          id: Utilities.getUuid(),
+          name: String(body.name || '').trim(),
+          email: email,
+          password: String(body.password || ''),
+          role: 'tech',
+          canManageUsers: canManage,
+          createdAt: new Date().toISOString(),
+        };
+        usersSheet.appendRow(buildUserRowByHeaders(headers, userObj));
+        appendAuditRow(ss, actor.id, actor.name, 'user_create', `Criou usuário ${userObj.name} (${userObj.email}).`);
+        return jsonOut({ ok: true, user: sanitizeUser(userObj) });
+      }
+
+      const idIdx = headers.indexOf('id');
+      const roleIdx = headers.indexOf('role');
+      const nameIdx = headers.indexOf('name');
+      const rowIdx = data.findIndex((row, idx) => idx > 0 && String(row[idIdx]) === String(body.targetUserId));
+      if (rowIdx === -1) return jsonOut({ ok: false, error: 'Usuário não encontrado.' });
+
+      const targetRole = String(data[rowIdx][roleIdx] || 'tech');
+      const targetName = String(data[rowIdx][nameIdx] || '');
+
+      // Nobody non-admin can touch an admin account
+      if (targetRole === 'admin' && actor.role !== 'admin') {
+        return jsonOut({ ok: false, error: 'Você não pode alterar a conta do administrador.' });
+      }
+
+      if (op === 'toggle_manage') {
+        if (actor.role !== 'admin') {
+          return jsonOut({ ok: false, error: 'Apenas o administrador pode conceder permissão de gerenciamento.' });
+        }
+        if (targetRole === 'admin') {
+          return jsonOut({ ok: false, error: 'O administrador já possui todas as permissões.' });
+        }
+        const canManageIdx = headers.indexOf('canManageUsers');
+        const nextVal = Boolean(body.canManageUsers);
+        usersSheet.getRange(rowIdx + 1, canManageIdx + 1).setValue(nextVal);
+        appendAuditRow(
+          ss,
+          actor.id,
+          actor.name,
+          'user_perm',
+          `${nextVal ? 'Concedeu' : 'Removeu'} permissão de gerenciar usuários para ${targetName}.`
+        );
+        return jsonOut({ ok: true });
+      }
+
+      if (op === 'reset_password') {
+        const passIdx = headers.indexOf('password');
+        usersSheet.getRange(rowIdx + 1, passIdx + 1).setValue(String(body.newPassword || ''));
+        appendAuditRow(ss, actor.id, actor.name, 'user_pass', `Redefiniu a senha de ${targetName}.`);
+        return jsonOut({ ok: true });
+      }
+
+      if (op === 'delete') {
+        if (targetRole === 'admin' || String(body.targetUserId) === String(actor.id)) {
+          return jsonOut({ ok: false, error: 'Não é possível excluir o administrador ou a si mesmo.' });
+        }
+        usersSheet.deleteRow(rowIdx + 1);
+        appendAuditRow(ss, actor.id, actor.name, 'user_delete', `Removeu o usuário ${targetName}.`);
+        return jsonOut({ ok: true });
+      }
+
+      return jsonOut({ ok: false, error: 'Operação inválida.' });
+    }
+
     if (action === 'save_settings') {
+      const actor = verifyActor(ss, body.actorId, body.actorPassword);
+      if (!actor) return jsonOut({ ok: false, error: 'Sessão inválida.' });
       const sheet = ss.getSheetByName(SHEETS.CONFIG);
       const data = sheet.getDataRange().getValues();
       const rowIdx = data.findIndex((row, idx) => idx > 0 && row[0] === 'settings');
@@ -315,7 +517,7 @@ function doPost(e) {
       } else {
         sheet.getRange(rowIdx + 1, 2).setValue(val);
       }
-      appendAuditRow(ss, body.actorId, body.actorName, 'settings', 'Atualizou configurações.');
+      appendAuditRow(ss, actor.id, actor.name, 'settings', 'Atualizou configurações.');
       return jsonOut({ ok: true });
     }
 

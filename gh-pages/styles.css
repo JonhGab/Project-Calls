@@ -799,3 +799,15 @@ body {
   color: var(--text-muted);
   white-space: nowrap;
 }
+
+.btn-danger-solid {
+  background: var(--danger);
+  color: #fff;
+}
+.btn-danger-solid:hover { background: #b91c1c; }
+
+.badge-admin {
+  background: #ede9fe;
+  color: #5b21b6;
+  border: 1px solid #ddd6fe;
+}

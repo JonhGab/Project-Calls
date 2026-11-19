@@ -38,7 +38,8 @@
           <input type="url" id="authSheetsUrl" placeholder="https://script.google.com/macros/s/.../exec" />
         </div>
         <div class="auth-hint">
-          Acesso padrão: <code>joao.silva@empresa.com.br</code> / senha: <code>123456</code>
+          Técnico: <code>joao.silva@empresa.com.br</code> / <code>123456</code><br />
+          Admin: <code>admin@empresa.com.br</code> / <code>admin123</code>
         </div>
       </form>
 
@@ -84,6 +85,9 @@
             ⬆️ Importar JSON
           </button>
           <input type="file" id="importFileInput" accept=".json,application/json" class="hidden" />
+          <button type="button" class="btn btn-secondary hidden" id="openUsersBtn">
+            👥 Usuários
+          </button>
           <button type="button" class="btn btn-secondary" id="openAuditBtn">
             📜 Log
           </button>
@@ -223,6 +227,7 @@
             <button type="button" class="tab" data-status="reminded">Lembrete Enviado</button>
             <button type="button" class="tab" data-status="overdue">⚠️ +3 Dias Atrasado</button>
             <button type="button" class="tab" data-status="resolved">Regularizados</button>
+            <button type="button" class="tab" data-status="trash" id="trashTabBtn">🗑️ Lixeira</button>
           </div>
 
           <div id="recordsList" class="records-list"></div>
@@ -361,6 +366,72 @@
             <button type="button" class="btn btn-secondary" id="previewOpenWebmailBtn">🌐 Abrir no Webmail</button>
             <button type="button" class="btn btn-primary" id="previewOpenDesktopBtn">🖥️ Abrir no New Outlook (Desktop)</button>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Delete Modal -->
+  <div class="modal-backdrop hidden" id="confirmDeleteModal" role="dialog" aria-modal="true" aria-labelledby="confirmDeleteTitle">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h3 id="confirmDeleteTitle">⚠️ Confirmar Exclusão</h3>
+        <button type="button" class="icon-btn" id="closeConfirmDeleteBtn" aria-label="Fechar">✕</button>
+      </div>
+      <form id="confirmDeleteForm" class="modal-body">
+        <input type="hidden" id="deleteRecordId" />
+        <input type="hidden" id="deleteMode" value="trash" />
+        <p class="helper-text" id="confirmDeleteSummary"></p>
+        <div class="field">
+          <label for="deleteConfirmInput">Digite <strong>EXCLUIR</strong> para confirmar:</label>
+          <input type="text" id="deleteConfirmInput" required placeholder="EXCLUIR" autocomplete="off" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelConfirmDeleteBtn">Cancelar</button>
+          <button type="submit" class="btn btn-danger-solid" id="confirmDeleteSubmitBtn">Mover para Lixeira</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Manage Users Modal -->
+  <div class="modal-backdrop hidden" id="usersModal" role="dialog" aria-modal="true" aria-labelledby="usersTitle">
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h3 id="usersTitle">👥 Gerenciar Usuários &amp; Permissões</h3>
+        <button type="button" class="icon-btn" id="closeUsersBtn" aria-label="Fechar">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="adminCreateUserForm" class="settings-section">
+          <h4>Cadastrar Novo Técnico</h4>
+          <div class="field-row">
+            <div class="field">
+              <label for="newTechName">Nome Completo *</label>
+              <input type="text" id="newTechName" required placeholder="Ex: Pedro Henrique" />
+            </div>
+            <div class="field">
+              <label for="newTechEmail">E-mail *</label>
+              <input type="email" id="newTechEmail" required placeholder="pedro@empresa.com.br" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="newTechPassword">Senha inicial *</label>
+              <input type="password" id="newTechPassword" minlength="4" required placeholder="••••••" />
+            </div>
+            <div class="field" style="justify-content: flex-end;">
+              <label class="checkbox-item hidden" id="newTechCanManageWrap">
+                <input type="checkbox" id="newTechCanManage" />
+                <span>Permitir gerenciar usuários</span>
+              </label>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm">+ Criar Técnico</button>
+        </form>
+
+        <div class="settings-section">
+          <h4>Usuários Cadastrados</h4>
+          <div id="usersManageList" class="audit-list"></div>
         </div>
       </div>
     </div>

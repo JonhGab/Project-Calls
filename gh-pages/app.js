@@ -23,10 +23,21 @@ function createSeedStore() {
     settings: { ...DEFAULT_SETTINGS },
     users: [
       {
+        id: 'tech-admin',
+        name: 'Administrador TI',
+        email: 'admin@empresa.com.br',
+        password: 'admin123',
+        role: 'admin',
+        canManageUsers: true,
+        createdAt: fourDaysAgo,
+      },
+      {
         id: 'tech-joao',
         name: 'João Silva',
         email: 'joao.silva@empresa.com.br',
         password: '123456',
+        role: 'tech',
+        canManageUsers: false,
         createdAt: fourDaysAgo,
       },
       {
@@ -34,6 +45,8 @@ function createSeedStore() {
         name: 'Ana Paula',
         email: 'ana.paula@empresa.com.br',
         password: '123456',
+        role: 'tech',
+        canManageUsers: false,
         createdAt: fourDaysAgo,
       },
     ],
@@ -55,6 +68,9 @@ function createSeedStore() {
         createdAt: twoHoursAgo,
         updatedAt: twoHoursAgo,
         reminders: [],
+        deletedAt: null,
+        deletedById: null,
+        deletedByName: null,
       },
       {
         id: crypto.randomUUID(),
@@ -82,6 +98,9 @@ function createSeedStore() {
             details: 'Chat direto do Teams aberto para rafael.mendes@empresa.com.br',
           },
         ],
+        deletedAt: null,
+        deletedById: null,
+        deletedByName: null,
       },
     ],
     auditLog: [
@@ -114,9 +133,21 @@ function loadStore() {
   }
   try {
     const parsed = JSON.parse(raw);
+    const users = Array.isArray(parsed.users) ? parsed.users : [];
+    if (!users.some((u) => u.role === 'admin')) {
+      users.unshift({
+        id: 'tech-admin',
+        name: 'Administrador TI',
+        email: 'admin@empresa.com.br',
+        password: 'admin123',
+        role: 'admin',
+        canManageUsers: true,
+        createdAt: new Date().toISOString(),
+      });
+    }
     return {
       settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
-      users: Array.isArray(parsed.users) ? parsed.users : [],
+      users,
       records: Array.isArray(parsed.records) ? parsed.records : [],
       auditLog: Array.isArray(parsed.auditLog) ? parsed.auditLog : [],
     };
@@ -135,6 +166,7 @@ const state = {
   sheetsUrl: localStorage.getItem(SHEETS_URL_KEY) || DEFAULT_SHEETS_URL,
   store: loadStore(),
   user: null,
+  authPassword: null,
   statusFilter: 'all',
   techFilter: '',
   search: '',
@@ -142,6 +174,14 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
+
+function isAdmin(user = state.user) {
+  return Boolean(user && user.role === 'admin');
+}
+
+function canManageUsers(user = state.user) {
+  return Boolean(user && (user.role === 'admin' || user.canManageUsers));
+}
 
 function showToast(message, type = 'info') {
   const container = el('toastContainer');
@@ -166,7 +206,11 @@ async function sheetsPost(payload) {
   const res = await fetch(state.sheetsUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      actorId: state.user?.id || payload.actorId || '',
+      actorPassword: state.authPassword || payload.actorPassword || '',
+    }),
   });
   const data = await res.json();
   if (!data.ok) throw new Error(data.error || 'Erro ao gravar no Google Sheets.');
@@ -184,6 +228,10 @@ async function syncFromSheets(quiet = false) {
       records: Array.isArray(remote.records) ? remote.records : [],
       auditLog: Array.isArray(remote.auditLog) ? remote.auditLog : [],
     };
+    if (state.user) {
+      const freshUser = state.store.users.find((u) => u.id === state.user.id);
+      if (freshUser) state.user = freshUser;
+    }
     saveStore(state.store);
     if (state.user) renderAll();
     if (!quiet) showToast('Sincronizado com o Google Sheets!', 'success');
@@ -214,7 +262,7 @@ function getDaysOpen(record) {
 }
 
 function isOverdue(record) {
-  return record.status !== 'resolved' && getDaysOpen(record) >= 3;
+  return !record.deletedAt && record.status !== 'resolved' && getDaysOpen(record) >= 3;
 }
 
 function setDefaultAttendedAt() {
@@ -308,7 +356,9 @@ function showAuthView() {
 function showAppView() {
   el('authView').classList.add('hidden');
   el('appView').classList.remove('hidden');
-  el('currentUserChip').textContent = `👤 ${state.user.name}`;
+  const roleTag = isAdmin() ? ' (Admin)' : canManageUsers() ? ' (Gestor)' : '';
+  el('currentUserChip').textContent = `👤 ${state.user.name}${roleTag}`;
+  el('openUsersBtn').classList.toggle('hidden', !canManageUsers());
   if (!el('technician').value) {
     el('technician').value = state.user.name;
   }
@@ -318,6 +368,7 @@ function showAppView() {
 
 function logout(notify = true) {
   state.user = null;
+  state.authPassword = null;
   state.overdueAlertShown = false;
   localStorage.removeItem(SESSION_KEY);
   showAuthView();
@@ -429,14 +480,26 @@ function renderTechniciansOptions() {
 }
 
 function renderKPIs() {
-  const records = state.store.records;
-  el('kpiTotal').textContent = records.length;
-  el('kpiPending').textContent = records.filter((r) => r.status === 'pending').length;
-  el('kpiReminded').textContent = records.filter((r) => r.status === 'reminded').length;
-  el('kpiResolved').textContent = records.filter((r) => r.status === 'resolved').length;
+  const activeRecords = state.store.records.filter((r) => !r.deletedAt);
+  el('kpiTotal').textContent = activeRecords.length;
+  el('kpiPending').textContent = activeRecords.filter((r) => r.status === 'pending').length;
+  el('kpiReminded').textContent = activeRecords.filter((r) => r.status === 'reminded').length;
+  el('kpiResolved').textContent = activeRecords.filter((r) => r.status === 'resolved').length;
+
+  const trashCount = state.store.records.filter(
+    (r) =>
+      r.deletedAt &&
+      (isAdmin() || r.createdById === state.user?.id || r.deletedById === state.user?.id)
+  ).length;
+  el('trashTabBtn').textContent = `🗑️ Lixeira (${trashCount})`;
 }
 
 function getStatusBadge(record) {
+  if (record.deletedAt) {
+    return `<span class="badge badge-overdue">🗑️ Excluído por ${escapeHtml(
+      record.deletedByName || '—'
+    )}</span>`;
+  }
   if (record.status === 'resolved') {
     const ticket = record.officialTicketId ? ` (${escapeHtml(record.officialTicketId)})` : '';
     return `<span class="badge badge-resolved">✓ Chamado Regularizado${ticket}</span>`;
@@ -455,10 +518,18 @@ function getFilteredRecords() {
   return [...state.store.records]
     .sort((a, b) => new Date(b.attendedAt || b.createdAt) - new Date(a.attendedAt || a.createdAt))
     .filter((r) => {
-      if (state.statusFilter === 'overdue') {
-        if (!isOverdue(r)) return false;
-      } else if (state.statusFilter !== 'all' && r.status !== state.statusFilter) {
-        return false;
+      if (state.statusFilter === 'trash') {
+        if (!r.deletedAt) return false;
+        if (!isAdmin() && r.createdById !== state.user?.id && r.deletedById !== state.user?.id) {
+          return false;
+        }
+      } else {
+        if (r.deletedAt) return false;
+        if (state.statusFilter === 'overdue') {
+          if (!isOverdue(r)) return false;
+        } else if (state.statusFilter !== 'all' && r.status !== state.statusFilter) {
+          return false;
+        }
       }
 
       if (state.techFilter && r.technician !== state.techFilter) return false;
@@ -488,7 +559,11 @@ function renderRecords() {
   if (filtered.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
-        <p>Nenhum atendimento encontrado com os filtros atuais.</p>
+        <p>${
+          state.statusFilter === 'trash'
+            ? 'A lixeira está vazia.'
+            : 'Nenhum atendimento encontrado com os filtros atuais.'
+        }</p>
       </div>
     `;
     return;
@@ -496,7 +571,7 @@ function renderRecords() {
 
   container.innerHTML = filtered
     .map((r) => {
-      const isOwner = state.user && r.createdById === state.user.id;
+      const canDelete = isAdmin() || (state.user && r.createdById === state.user.id);
       const overdueClass = isOverdue(r) ? 'is-overdue' : '';
 
       const historyHtml =
@@ -517,6 +592,46 @@ function renderRecords() {
                 .join('')}
             </div>`
           : '';
+
+      const actionsHtml = r.deletedAt
+        ? `
+          <button type="button" class="btn btn-success btn-sm" data-action="restore">
+            ♻️ Restaurar
+          </button>
+          ${
+            isAdmin()
+              ? `<button type="button" class="btn btn-danger-ghost btn-sm" data-action="purge">
+                  ❌ Excluir Definitivamente
+                </button>`
+              : ''
+          }`
+        : `
+          <button type="button" class="btn btn-teams btn-sm" data-action="teams-desktop">
+            🖥️ Teams Desktop
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" data-action="teams-chat">
+            💬 Teams Web
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" data-action="email-preview">
+            ✉️ Gerar E-mail
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" data-action="copy">
+            📋 Copiar Texto
+          </button>
+          ${
+            r.status !== 'resolved'
+              ? `<button type="button" class="btn btn-success btn-sm" data-action="resolve">
+                  ✓ Regularizar
+                </button>`
+              : ''
+          }
+          ${
+            canDelete
+              ? `<button type="button" class="btn btn-danger-ghost btn-sm" data-action="delete">
+                  🗑️ Excluir
+                </button>`
+              : ''
+          }`;
 
       return `
         <article class="record-item ${overdueClass}" data-id="${escapeHtml(r.id)}">
@@ -545,34 +660,7 @@ function renderRecords() {
 
           <div class="record-problem">${escapeHtml(r.problemDescription)}</div>
 
-          <div class="record-actions">
-            <button type="button" class="btn btn-teams btn-sm" data-action="teams-desktop">
-              🖥️ Teams Desktop
-            </button>
-            <button type="button" class="btn btn-secondary btn-sm" data-action="teams-chat">
-              💬 Teams Web
-            </button>
-            <button type="button" class="btn btn-primary btn-sm" data-action="email-preview">
-              ✉️ Gerar E-mail
-            </button>
-            <button type="button" class="btn btn-secondary btn-sm" data-action="copy">
-              📋 Copiar Texto
-            </button>
-            ${
-              r.status !== 'resolved'
-                ? `<button type="button" class="btn btn-success btn-sm" data-action="resolve">
-                    ✓ Regularizar
-                  </button>`
-                : ''
-            }
-            ${
-              isOwner
-                ? `<button type="button" class="btn btn-danger-ghost btn-sm" data-action="delete">
-                    🗑️ Excluir
-                  </button>`
-                : ''
-            }
-          </div>
+          <div class="record-actions">${actionsHtml}</div>
           ${historyHtml}
         </article>
       `;
@@ -606,12 +694,28 @@ el('loginForm').addEventListener('submit', async (e) => {
     state.sheetsUrl = sheetsInput;
     localStorage.setItem(SHEETS_URL_KEY, sheetsInput);
   }
-  if (state.sheetsUrl) {
-    await syncFromSheets(true);
-  }
 
   const email = el('loginEmail').value.trim().toLowerCase();
   const password = el('loginPassword').value;
+
+  if (state.sheetsUrl) {
+    try {
+      const res = await sheetsPost({ action: 'login', email, password });
+      state.user = res.user;
+      state.authPassword = password;
+      await syncFromSheets(true);
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ userId: res.user.id, authPassword: password })
+      );
+      showAppView();
+      showToast(`Bem-vindo, ${res.user.name}!`, 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+    return;
+  }
+
   const user = state.store.users.find(
     (u) => u.email.toLowerCase() === email && u.password === password
   );
@@ -620,7 +724,8 @@ el('loginForm').addEventListener('submit', async (e) => {
     return;
   }
   state.user = user;
-  localStorage.setItem(SESSION_KEY, user.id);
+  state.authPassword = password;
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ userId: user.id, authPassword: password }));
   showAppView();
   showToast(`Bem-vindo, ${user.name}!`, 'success');
 });
@@ -633,10 +738,15 @@ el('registerForm').addEventListener('submit', async (e) => {
 
   if (state.sheetsUrl) {
     try {
+      // Server ALWAYS forces role = 'tech', canManageUsers = false
       const res = await sheetsPost({ action: 'register', name, email, password });
       state.user = res.user;
+      state.authPassword = password;
       await syncFromSheets(true);
-      localStorage.setItem(SESSION_KEY, res.user.id);
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ userId: res.user.id, authPassword: password })
+      );
       showAppView();
       showToast(`Técnico ${name} cadastrado no Google Sheets!`, 'success');
       return;
@@ -651,11 +761,14 @@ el('registerForm').addEventListener('submit', async (e) => {
     return;
   }
 
+  // Public self-registration NEVER grants admin
   const user = {
     id: crypto.randomUUID(),
     name,
     email,
     password,
+    role: 'tech',
+    canManageUsers: false,
     createdAt: new Date().toISOString(),
   };
   state.store.users.push(user);
@@ -663,9 +776,10 @@ el('registerForm').addEventListener('submit', async (e) => {
     state.store.settings.technicians.push(name);
   }
   state.user = user;
+  state.authPassword = password;
   addAudit('register', `Técnico ${name} (${email}) cadastrado no sistema.`);
   saveStore(state.store);
-  localStorage.setItem(SESSION_KEY, user.id);
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ userId: user.id, authPassword: password }));
   showAppView();
   showToast(`Técnico ${name} cadastrado com sucesso!`, 'success');
 });
@@ -742,6 +856,9 @@ el('recordForm').addEventListener('submit', async (e) => {
     status: 'pending',
     officialTicketId: null,
     reminders: [],
+    deletedAt: null,
+    deletedById: null,
+    deletedByName: null,
   };
 
   try {
@@ -791,7 +908,6 @@ async function logReminder(record, channel, details) {
         action: 'update_record',
         id: record.id,
         record,
-        actorId: state.user.id,
         actorName: state.user.name,
         auditAction: 'remind',
         auditSummary: summary,
@@ -801,6 +917,83 @@ async function logReminder(record, channel, details) {
     }
   }
 }
+
+function openConfirmDeleteModal(record, mode = 'trash') {
+  el('deleteRecordId').value = record.id;
+  el('deleteMode').value = mode;
+  el('deleteConfirmInput').value = '';
+  el('confirmDeleteTitle').textContent =
+    mode === 'purge' ? '❌ Excluir Definitivamente' : '⚠️ Mover Atendimento para Lixeira';
+  el('confirmDeleteSubmitBtn').textContent =
+    mode === 'purge' ? 'Excluir Permanentemente' : 'Mover para Lixeira';
+  el('confirmDeleteSummary').innerHTML =
+    mode === 'purge'
+      ? `Esta ação apagará <strong>permanentemente</strong> o atendimento de <strong>${escapeHtml(
+          record.userName
+        )}</strong> (técnico: ${escapeHtml(record.technician)}). Não poderá ser desfeita.`
+      : `Você está prestes a mover para a lixeira o atendimento de <strong>${escapeHtml(
+          record.userName
+        )}</strong> (registrado por ${escapeHtml(
+          record.createdByName || record.technician
+        )}). Você poderá restaurá-lo depois na aba <strong>🗑️ Lixeira</strong>.`;
+  el('confirmDeleteModal').classList.remove('hidden');
+  el('deleteConfirmInput').focus();
+}
+
+function closeConfirmDeleteModal() {
+  el('confirmDeleteModal').classList.add('hidden');
+}
+
+el('closeConfirmDeleteBtn').addEventListener('click', closeConfirmDeleteModal);
+el('cancelConfirmDeleteBtn').addEventListener('click', closeConfirmDeleteModal);
+
+el('confirmDeleteForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (el('deleteConfirmInput').value.trim().toUpperCase() !== 'EXCLUIR') {
+    showToast('Digite exatamente EXCLUIR para confirmar.', 'error');
+    return;
+  }
+
+  const id = el('deleteRecordId').value;
+  const mode = el('deleteMode').value;
+  const record = state.store.records.find((r) => r.id === id);
+  if (!record) return;
+
+  try {
+    if (mode === 'purge') {
+      if (!isAdmin()) {
+        showToast('Apenas o administrador pode excluir definitivamente.', 'error');
+        return;
+      }
+      if (state.sheetsUrl) {
+        await sheetsPost({ action: 'purge_record', id });
+      }
+      state.store.records = state.store.records.filter((r) => r.id !== id);
+      addAudit('purge', `Excluiu permanentemente o atendimento de ${record.userName}.`);
+      showToast('Atendimento excluído permanentemente.', 'info');
+    } else {
+      if (!isAdmin() && record.createdById !== state.user.id) {
+        showToast('Você só pode excluir atendimentos registrados por você.', 'error');
+        return;
+      }
+      const now = new Date().toISOString();
+      if (state.sheetsUrl) {
+        await sheetsPost({ action: 'delete_record', id });
+      }
+      record.deletedAt = now;
+      record.deletedById = state.user.id;
+      record.deletedByName = state.user.name;
+      addAudit('trash', `Moveu atendimento de ${record.userName} para a lixeira.`);
+      showToast('Atendimento movido para a lixeira. Você pode restaurar na aba Lixeira.', 'info');
+    }
+
+    saveStore(state.store);
+    renderAll();
+    closeConfirmDeleteModal();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+});
 
 async function handleRecordAction(id, action) {
   const record = state.store.records.find((r) => r.id === id);
@@ -840,28 +1033,38 @@ async function handleRecordAction(id, action) {
   }
 
   if (action === 'delete') {
-    if (record.createdById !== state.user.id) {
+    if (!isAdmin() && record.createdById !== state.user.id) {
       showToast('Você só pode excluir atendimentos registrados por você.', 'error');
       return;
     }
-    if (!confirm(`Excluir o registro de atendimento de ${record.userName}?`)) return;
+    openConfirmDeleteModal(record, 'trash');
+    return;
+  }
+
+  if (action === 'restore') {
     try {
       if (state.sheetsUrl) {
-        await sheetsPost({
-          action: 'delete_record',
-          id,
-          actorId: state.user.id,
-          actorName: state.user.name,
-        });
+        await sheetsPost({ action: 'restore_record', id });
       }
-      state.store.records = state.store.records.filter((r) => r.id !== id);
-      addAudit('delete', `Excluiu o atendimento de ${record.userName} (${record.category})`);
+      record.deletedAt = null;
+      record.deletedById = null;
+      record.deletedByName = null;
+      addAudit('restore', `Restaurou atendimento de ${record.userName} da lixeira.`);
       saveStore(state.store);
       renderAll();
-      showToast('Atendimento excluído.', 'info');
+      showToast(`Atendimento de ${record.userName} restaurado!`, 'success');
     } catch (err) {
       showToast(err.message, 'error');
     }
+    return;
+  }
+
+  if (action === 'purge') {
+    if (!isAdmin()) {
+      showToast('Apenas o administrador pode excluir definitivamente.', 'error');
+      return;
+    }
+    openConfirmDeleteModal(record, 'purge');
   }
 }
 
@@ -899,6 +1102,199 @@ el('statusTabs').addEventListener('click', (e) => {
   tab.classList.add('active');
   state.statusFilter = tab.dataset.status;
   renderRecords();
+});
+
+// Users Management Modal
+function renderUsersManageList() {
+  const list = el('usersManageList');
+  list.innerHTML = state.store.users
+    .map((u) => {
+      const userIsAdmin = u.role === 'admin';
+      const isSelf = state.user && u.id === state.user.id;
+      const roleBadge = userIsAdmin
+        ? '<span class="badge badge-admin">🛡️ Administrador</span>'
+        : u.canManageUsers
+        ? '<span class="badge badge-reminded">👥 Gerencia Usuários</span>'
+        : '<span class="badge badge-neutral">Técnico</span>';
+
+      const canTouchTarget = !userIsAdmin || isAdmin();
+      return `
+        <div class="audit-item" data-uid="${escapeHtml(u.id)}" style="align-items: center;">
+          <div>
+            <strong>${escapeHtml(u.name)}</strong> (${escapeHtml(u.email)}) ${roleBadge}
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            ${
+              isAdmin() && !userIsAdmin
+                ? `<button type="button" class="btn btn-secondary btn-sm" data-uop="toggle_manage">
+                    ${u.canManageUsers ? 'Revogar Gestão' : 'Dar Permissão de Gestão'}
+                  </button>`
+                : ''
+            }
+            ${
+              canTouchTarget
+                ? `<button type="button" class="btn btn-secondary btn-sm" data-uop="reset_password">
+                    🔑 Redefinir Senha
+                  </button>`
+                : ''
+            }
+            ${
+              !userIsAdmin && !isSelf
+                ? `<button type="button" class="btn btn-danger-ghost btn-sm" data-uop="delete">
+                    🗑️ Remover
+                  </button>`
+                : ''
+            }
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+el('openUsersBtn').addEventListener('click', () => {
+  if (!canManageUsers()) {
+    showToast('Você não tem permissão para gerenciar usuários.', 'error');
+    return;
+  }
+  el('newTechCanManageWrap').classList.toggle('hidden', !isAdmin());
+  renderUsersManageList();
+  el('usersModal').classList.remove('hidden');
+});
+
+el('closeUsersBtn').addEventListener('click', () => el('usersModal').classList.add('hidden'));
+
+el('adminCreateUserForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!canManageUsers()) return;
+
+  const name = el('newTechName').value.trim();
+  const email = el('newTechEmail').value.trim().toLowerCase();
+  const password = el('newTechPassword').value;
+  const grantManage = isAdmin() ? el('newTechCanManage').checked : false;
+
+  try {
+    if (state.sheetsUrl) {
+      const res = await sheetsPost({
+        action: 'manage_user',
+        op: 'create',
+        name,
+        email,
+        password,
+        canManageUsers: grantManage,
+      });
+      state.store.users.push(res.user);
+    } else {
+      if (state.store.users.some((u) => u.email.toLowerCase() === email)) {
+        throw new Error('E-mail já cadastrado.');
+      }
+      state.store.users.push({
+        id: crypto.randomUUID(),
+        name,
+        email,
+        password,
+        role: 'tech',
+        canManageUsers: grantManage,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    if (!state.store.settings.technicians.includes(name)) {
+      state.store.settings.technicians.push(name);
+    }
+    addAudit('user_create', `Criou usuário ${name} (${email}).`);
+    saveStore(state.store);
+    el('adminCreateUserForm').reset();
+    renderUsersManageList();
+    renderTechniciansOptions();
+    showToast(`Técnico ${name} criado com sucesso!`, 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+});
+
+el('usersManageList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-uop]');
+  if (!btn) return;
+  const uid = btn.closest('[data-uid]')?.dataset.uid;
+  const target = state.store.users.find((u) => u.id === uid);
+  if (!target) return;
+
+  const op = btn.dataset.uop;
+
+  try {
+    if (op === 'toggle_manage') {
+      if (!isAdmin()) {
+        showToast('Apenas o administrador pode alterar permissões.', 'error');
+        return;
+      }
+      const nextVal = !target.canManageUsers;
+      if (state.sheetsUrl) {
+        await sheetsPost({
+          action: 'manage_user',
+          op: 'toggle_manage',
+          targetUserId: uid,
+          canManageUsers: nextVal,
+        });
+      }
+      target.canManageUsers = nextVal;
+      addAudit(
+        'user_perm',
+        `${nextVal ? 'Concedeu' : 'Removeu'} permissão de gerenciar usuários para ${target.name}.`
+      );
+      saveStore(state.store);
+      renderUsersManageList();
+      showToast('Permissão atualizada!', 'success');
+    } else if (op === 'reset_password') {
+      if (target.role === 'admin' && !isAdmin()) {
+        showToast('Você não pode alterar a senha do administrador.', 'error');
+        return;
+      }
+      const newPass = prompt(`Digite a nova senha para ${target.name} (mín. 4 caracteres):`);
+      if (!newPass || newPass.length < 4) {
+        if (newPass !== null) showToast('Senha deve ter pelo menos 4 caracteres.', 'error');
+        return;
+      }
+      if (state.sheetsUrl) {
+        await sheetsPost({
+          action: 'manage_user',
+          op: 'reset_password',
+          targetUserId: uid,
+          newPassword: newPass,
+        });
+      }
+      target.password = newPass;
+      if (target.id === state.user.id) {
+        state.authPassword = newPass;
+        localStorage.setItem(
+          SESSION_KEY,
+          JSON.stringify({ userId: state.user.id, authPassword: newPass })
+        );
+      }
+      addAudit('user_pass', `Redefiniu a senha de ${target.name}.`);
+      saveStore(state.store);
+      showToast(`Senha de ${target.name} atualizada!`, 'success');
+    } else if (op === 'delete') {
+      if (target.role === 'admin' || target.id === state.user.id) {
+        showToast('Não é possível remover o administrador ou a si mesmo.', 'error');
+        return;
+      }
+      if (!confirm(`Remover o técnico ${target.name} (${target.email})?`)) return;
+      if (state.sheetsUrl) {
+        await sheetsPost({
+          action: 'manage_user',
+          op: 'delete',
+          targetUserId: uid,
+        });
+      }
+      state.store.users = state.store.users.filter((u) => u.id !== uid);
+      addAudit('user_delete', `Removeu o usuário ${target.name}.`);
+      saveStore(state.store);
+      renderUsersManageList();
+      showToast(`Usuário ${target.name} removido.`, 'info');
+    }
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
 });
 
 // Overdue modal triggers
@@ -957,7 +1353,6 @@ el('resolveForm').addEventListener('submit', async (e) => {
         action: 'update_record',
         id: record.id,
         record,
-        actorId: state.user.id,
         actorName: state.user.name,
         auditAction: 'resolve',
         auditSummary: summary,
@@ -1067,7 +1462,6 @@ el('settingsForm').addEventListener('submit', async (e) => {
       await sheetsPost({
         action: 'save_settings',
         settings: state.store.settings,
-        actorId: state.user.id,
         actorName: state.user.name,
       });
     }
@@ -1087,13 +1481,19 @@ async function bootstrap() {
   if (state.sheetsUrl) {
     await syncFromSheets(true);
   }
-  const savedSessionId = localStorage.getItem(SESSION_KEY);
-  if (savedSessionId) {
-    const found = state.store.users.find((u) => u.id === savedSessionId);
-    if (found) {
-      state.user = found;
-      showAppView();
-      return;
+  const savedRaw = localStorage.getItem(SESSION_KEY);
+  if (savedRaw) {
+    try {
+      const saved = JSON.parse(savedRaw);
+      const found = state.store.users.find((u) => u.id === saved.userId);
+      if (found) {
+        state.user = found;
+        state.authPassword = saved.authPassword || null;
+        showAppView();
+        return;
+      }
+    } catch {
+      localStorage.removeItem(SESSION_KEY);
     }
   }
   showAuthView();
